@@ -221,10 +221,24 @@ public class PlayerController : MonoBehaviour
         Vector3 t = Vector3.Cross(up, n).normalized;
 
         Vector3 pref = planarVel; pref.y = 0f;
-        if (pref.sqrMagnitude < 0.01f) { pref = cameraRig.forward; pref.y = 0f; }
-        pref.Normalize();
-        if (Vector3.Dot(pref, t) < 0f) t = -t;
+        if (pref.sqrMagnitude < 0.01f)
+        {
+            pref = (cameraRig != null ? cameraRig.forward : transform.forward);
+            pref.y = 0f;
+        }
 
+        if (pref.sqrMagnitude < 0.0001f)
+        {
+            pref = transform.forward;
+            pref.y = 0f;
+        }
+
+        if (pref.sqrMagnitude > 0.0001f)
+        {
+            pref.Normalize();
+            if (Vector3.Dot(pref, t) < 0f) t = -t;
+        }
+        
         wallNormal = n;
         wallTangent = t;
         isWallRunning = true;
