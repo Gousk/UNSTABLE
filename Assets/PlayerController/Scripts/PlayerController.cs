@@ -17,6 +17,13 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float walkSpeed = 5.0f;
     [SerializeField] private float sprintSpeed = 8.0f;
 
+    [Header("Crouch")]
+    [SerializeField] private float crouchSpeed = 3.0f;
+    [SerializeField] private float crouchHeight = 1.2f;
+    [SerializeField] private float crouchTransitionSpeed = 6f;
+    [SerializeField] private float crouchCameraOffset = -0.5f;
+    [SerializeField] private float crouchCameraSmooth = 12f;
+
     [Header("Ground Responsiveness")]
     [SerializeField] private float groundAccel = 80f;        // m/s^2
     [SerializeField] private float groundBrake = 140f;       // m/s^2
@@ -59,6 +66,13 @@ public class PlayerController : MonoBehaviour
     private float lastGroundedTime;
     private float lastJumpPressedTime;
     private bool sprintActive; // yerde güncellenir (latch)
+    private bool isCrouching;
+
+    private float standHeight;
+    private float controllerBottomOffset;
+    private Vector3 standCameraLocalPos;
+    private Vector3 crouchCameraLocalPos;
+    private bool hasCameraRigLocal;
 
     // Wallrun state
     private bool isWallRunning;
@@ -72,23 +86,34 @@ public class PlayerController : MonoBehaviour
     private void Awake()
     {
         cc = GetComponent<CharacterController>();
+        standHeight = cc.height;
+        controllerBottomOffset = cc.center.y - standHeight * 0.5f;
+        crouchHeight = Mathf.Clamp(crouchHeight, cc.radius * 2f + 0.02f, standHeight);
+
         if (cameraRig == null) cameraRig = transform;
+        hasCameraRigLocal = cameraRig != transform;
+        if (hasCameraRigLocal)
+        {
+            standCameraLocalPos = cameraRig.localPosition;
+            crouchCameraLocalPos = standCameraLocalPos + Vector3.up * crouchCameraOffset;
+        }
 
         if (groundProbe == null)
         {
             var g = new GameObject("GroundProbe");
             g.transform.SetParent(transform);
-            g.transform.localPosition = new Vector3(0f, -cc.height * 0.5f + cc.skinWidth + 0.02f, 0f);
             groundProbe = g.transform;
         }
+        UpdateGroundProbePosition();
     }
 
     // ========= Update (called by Player.cs) =========
-    public void TickMovement(Vector2 moveInput, bool sprintHeld, float dt)
+    public void TickMovement(Vector2 moveInput, bool sprintHeld, bool crouchHeld, float dt)
     {
         bool grounded = IsGrounded();
         if (grounded) lastGroundedTime = Time.time;
-        if (grounded) sprintActive = sprintHeld;
+        UpdateCrouchState(crouchHeld, dt);
+        if (grounded) sprintActive = sprintHeld && !isCrouching;
 
         // Input yönleri
         Vector3 fwd = cameraRig.forward; fwd.y = 0f; fwd.Normalize();
@@ -97,7 +122,7 @@ public class PlayerController : MonoBehaviour
         float wishMag = Mathf.Clamp01(wishDir.magnitude);
         if (wishMag > 0f) wishDir /= Mathf.Max(wishMag, 0.0001f);
 
-        float runCap = (sprintActive ? sprintSpeed : walkSpeed) * wishMag;
+        float runCap = (isCrouching ? crouchSpeed : (sprintActive ? sprintSpeed : walkSpeed)) * wishMag;
 
         // Jump'ı önce tüket
         bool jumpedThisFrame = TryConsumeJumpImmediate(grounded);
@@ -311,6 +336,57 @@ public class PlayerController : MonoBehaviour
     }
 
     // ============== CORE HELPERS ==============
+
+    private void UpdateCrouchState(bool crouchHeld, float dt)
+    {
+        bool wantsCrouch = crouchHeld;
+        if (!wantsCrouch && isCrouching)
+        {
+            if (!CanStandUp()) wantsCrouch = true;
+        }
+
+        isCrouching = wantsCrouch;
+
+        float targetHeight = isCrouching ? crouchHeight : standHeight;
+        float newHeight = Mathf.MoveTowards(cc.height, targetHeight, crouchTransitionSpeed * dt);
+        if (!Mathf.Approximately(newHeight, cc.height))
+        {
+            ApplyControllerHeight(newHeight);
+        }
+
+        if (hasCameraRigLocal && cameraRig != null)
+        {
+            Vector3 target = isCrouching ? crouchCameraLocalPos : standCameraLocalPos;
+            float t = 1f - Mathf.Exp(-crouchCameraSmooth * dt);
+            cameraRig.localPosition = Vector3.Lerp(cameraRig.localPosition, target, t);
+        }
+    }
+
+    private void ApplyControllerHeight(float height)
+    {
+        float minHeight = Mathf.Max(cc.radius * 2f + 0.01f, 0.1f);
+        float clamped = Mathf.Max(height, minHeight);
+        cc.height = clamped;
+        Vector3 center = cc.center;
+        center.y = controllerBottomOffset + clamped * 0.5f;
+        cc.center = center;
+        UpdateGroundProbePosition();
+    }
+
+    private void UpdateGroundProbePosition()
+    {
+        if (groundProbe == null) return;
+        groundProbe.localPosition = new Vector3(0f, -cc.height * 0.5f + cc.skinWidth + 0.02f, 0f);
+    }
+
+    private bool CanStandUp()
+    {
+        float radius = Mathf.Max(0.01f, cc.radius - 0.01f);
+        Vector3 bottom = transform.position + Up * (controllerBottomOffset + radius + 0.01f);
+        float segment = Mathf.Max(0f, standHeight - radius * 2f);
+        Vector3 top = bottom + Up * segment;
+        return !Physics.CheckCapsule(bottom, top, radius, ~0, QueryTriggerInteraction.Ignore);
+    }
 
     private bool TryConsumeJumpImmediate(bool groundedNow)
     {
