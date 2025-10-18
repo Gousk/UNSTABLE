@@ -15,6 +15,7 @@ public class Player : MonoBehaviour
     private InputAction lookAction;
     private InputAction jumpAction;
     private InputAction sprintAction;
+    private InputAction crouchAction;
 
     private Vector2 moveInput;
     private Vector2 lookInput;
@@ -47,6 +48,7 @@ public class Player : MonoBehaviour
         lookAction?.Dispose();
         jumpAction?.Dispose();
         sprintAction?.Dispose();
+        crouchAction?.Dispose();
     }
 
     private void SetupInputActions()
@@ -85,6 +87,12 @@ public class Player : MonoBehaviour
         sprintAction.AddBinding("<Gamepad>/leftStickPress");
         sprintAction.performed += _ => sprintHeld = true;
         sprintAction.canceled += _ => sprintHeld = false;
+
+        // Crouch (hold)
+        crouchAction = new InputAction("Crouch", InputActionType.Button);
+        crouchAction.AddBinding("<Keyboard>/leftCtrl");
+        crouchAction.AddBinding("<Keyboard>/c");
+        crouchAction.AddBinding("<Gamepad>/rightStickPress");
     }
 
     private void EnableActions()
@@ -93,6 +101,7 @@ public class Player : MonoBehaviour
         lookAction?.Enable();
         jumpAction?.Enable();
         sprintAction?.Enable();
+        crouchAction?.Enable();
     }
 
     private void DisableActions()
@@ -101,12 +110,14 @@ public class Player : MonoBehaviour
         lookAction?.Disable();
         jumpAction?.Disable();
         sprintAction?.Disable();
+        crouchAction?.Disable();
     }
 
     private void Update()
     {
         if (movement == null) return;
-        movement.TickMovement(moveInput, sprintHeld, Time.deltaTime);
+        bool crouchHeld = crouchAction != null && crouchAction.IsPressed();
+        movement.TickMovement(moveInput, sprintHeld, crouchHeld, Time.deltaTime);
     }
 
     private void LateUpdate()
