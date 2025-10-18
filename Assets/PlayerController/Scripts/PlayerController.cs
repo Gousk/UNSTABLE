@@ -23,6 +23,20 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float crouchTransitionSpeed = 6f;
     [SerializeField] private float crouchCameraOffset = -0.5f;
     [SerializeField] private float crouchCameraSmooth = 12f;
+    [SerializeField] private LayerMask standCheckMask = ~0; // set in Inspector to exclude Player layer if you have one
+    private readonly Collider[] _standBuf = new Collider[16];
+
+    // ============== SLIDE ==============
+    [Header("Slide")]
+    [SerializeField] private float slideMinSpeed = 6.0f;     // başlatmak için gereken yatay hız
+    [SerializeField] private float slideEndSpeed = 3.5f;     // bunun altına inince (veya tuş bırakılınca) biter
+    [SerializeField] private float slideFriction = 5.0f;     // düz zeminde yavaşlama (m/s^2)
+    [SerializeField] private float slideTurnRate = 6f;       // slayt sırasında hafif yön verme (1/s)
+    [SerializeField] private float cameraTiltOnSlide = 5f;   // roll derecesi
+    private bool isSliding;
+
+    // Ground normal’ı saklayalım ki eğim ivmesini hesaplayabilelim
+    private Vector3 groundNormal = Vector3.up;
 
     [Header("Ground Responsiveness")]
     [SerializeField] private float groundAccel = 80f;        // m/s^2
@@ -112,8 +126,19 @@ public class PlayerController : MonoBehaviour
     {
         bool grounded = IsGrounded();
         if (grounded) lastGroundedTime = Time.time;
+
         UpdateCrouchState(crouchHeld, dt);
-        if (grounded) sprintActive = sprintHeld && !isCrouching;
+
+        // Slide başlatma koşulu (crouch + hız eşiği + yerde)
+        float horizontalSpeed = new Vector3(planarVel.x, 0f, planarVel.z).magnitude;
+        if (!isSliding && grounded && isCrouching && horizontalSpeed >= slideMinSpeed)
+            StartSlide();
+
+        // Slide bitiş koşulları
+        if (isSliding && (!grounded || !isCrouching || horizontalSpeed <= slideEndSpeed))
+            StopSlide();
+
+        if (grounded) sprintActive = sprintHeld && !isCrouching && !isSliding;
 
         // Input yönleri
         Vector3 fwd = cameraRig.forward; fwd.y = 0f; fwd.Normalize();
@@ -124,7 +149,7 @@ public class PlayerController : MonoBehaviour
 
         float runCap = (isCrouching ? crouchSpeed : (sprintActive ? sprintSpeed : walkSpeed)) * wishMag;
 
-        // Jump'ı önce tüket
+        // Jump
         bool jumpedThisFrame = TryConsumeJumpImmediate(grounded);
 
         // ---- Wallrun FSM ----
@@ -139,16 +164,16 @@ public class PlayerController : MonoBehaviour
         }
         else if (isWallRunning) StopWallRun();
 
-        // ---- Normal / Air movement ----
-        if (grounded)
+        // ---- Movement ----
+        if (grounded && !isSliding)
         {
+            // (Mevcut yerdeki hareket mantığın aynen kalsın)
             if (wishMag > 0f)
             {
                 Vector3 desiredDir = wishDir;
                 float vAlong = Vector3.Dot(planarVel, desiredDir);
                 Vector3 vPerp = planarVel - desiredDir * vAlong;
 
-                // yan bileşeni söndür (responsive)
                 float perpMag = vPerp.magnitude;
                 if (perpMag > 0f)
                 {
@@ -157,10 +182,7 @@ public class PlayerController : MonoBehaviour
                     vPerp = (vPerp / perpMag) * newPerpMag;
                 }
 
-                // karşı yöne fren
                 if (vAlong < 0f) vAlong = Mathf.Min(0f, vAlong + groundBrake * dt);
-
-                // cap'e kadar hızlan (cap üstünde ivme verme → momentum korunur)
                 if (vAlong < runCap) vAlong = Mathf.Min(runCap, vAlong + groundAccel * dt);
 
                 planarVel = desiredDir * vAlong + vPerp;
@@ -170,16 +192,22 @@ public class PlayerController : MonoBehaviour
                 planarVel = Vector3.MoveTowards(planarVel, Vector3.zero, groundDecelNoInput * dt);
             }
 
-            if (verticalVel < 0f) verticalVel = -2f; // zemine hafif yapış
+            if (verticalVel < 0f) verticalVel = -2f;
             TryGroundSnap();
         }
-        else if (!isWallRunning) // normal havada
+        else if (grounded && isSliding)
+        {
+            // SLIDE hareketi
+            UpdateSlide(wishDir, wishMag, dt);
+            TryGroundSnap(); // merdiven / küçük inişlerde yere yapışık kal
+        }
+        else if (!isWallRunning) // havada
         {
             if (planarVel.sqrMagnitude > 0.000001f && wishMag > 0f && airControl > 0f)
             {
                 float t = 1f - Mathf.Exp(-airTurnRate * Mathf.Clamp01(airControl) * dt);
                 Vector3 newDir = Vector3.Slerp(planarVel.normalized, wishDir, t).normalized;
-                planarVel = newDir * planarVel.magnitude; // hız büyüklüğünü koru
+                planarVel = newDir * planarVel.magnitude;
             }
 
             if (airAccel > 0f && wishMag > 0f)
@@ -200,6 +228,7 @@ public class PlayerController : MonoBehaviour
         Vector3 total = planarVel + Up * verticalVel;
         cc.Move(total * dt);
     }
+
 
     public void QueueJump() => lastJumpPressedTime = Time.time;
 
@@ -340,20 +369,28 @@ public class PlayerController : MonoBehaviour
     private void UpdateCrouchState(bool crouchHeld, float dt)
     {
         bool wantsCrouch = crouchHeld;
+
+        // If releasing crouch but blocked above, stay crouched until it's safe
         if (!wantsCrouch && isCrouching)
         {
-            if (!CanStandUp()) wantsCrouch = true;
+            if (!CanStandUp())
+                wantsCrouch = true;
         }
 
+        // Update crouch flag
         isCrouching = wantsCrouch;
 
+        // Smoothly adjust controller height
         float targetHeight = isCrouching ? crouchHeight : standHeight;
-        float newHeight = Mathf.MoveTowards(cc.height, targetHeight, crouchTransitionSpeed * dt);
-        if (!Mathf.Approximately(newHeight, cc.height))
-        {
-            ApplyControllerHeight(newHeight);
-        }
+        cc.height = Mathf.MoveTowards(cc.height, targetHeight, crouchTransitionSpeed * dt);
 
+        // Adjust center so feet stay fixed
+        Vector3 center = cc.center;
+        center.y = controllerBottomOffset + cc.height * 0.5f;
+        cc.center = center;
+        UpdateGroundProbePosition();
+
+        // Smooth camera move
         if (hasCameraRigLocal && cameraRig != null)
         {
             Vector3 target = isCrouching ? crouchCameraLocalPos : standCameraLocalPos;
@@ -381,11 +418,85 @@ public class PlayerController : MonoBehaviour
 
     private bool CanStandUp()
     {
+        // Build a "would-be standing" capsule positioned so feet stay anchored.
         float radius = Mathf.Max(0.01f, cc.radius - 0.01f);
+
+        // Small safety so barely-touching ceilings don't block
+        const float safety = 0.02f;
+
         Vector3 bottom = transform.position + Up * (controllerBottomOffset + radius + 0.01f);
-        float segment = Mathf.Max(0f, standHeight - radius * 2f);
+        float segment = Mathf.Max(0f, (standHeight - safety) - radius * 2f);
         Vector3 top = bottom + Up * segment;
-        return !Physics.CheckCapsule(bottom, top, radius, ~0, QueryTriggerInteraction.Ignore);
+
+        int hitCount = Physics.OverlapCapsuleNonAlloc(
+            bottom, top, radius, _standBuf, standCheckMask, QueryTriggerInteraction.Ignore);
+
+        for (int i = 0; i < hitCount; i++)
+        {
+            var col = _standBuf[i];
+            if (!col) continue;
+
+            // Ignore anything on me / in my hierarchy
+            if (col.transform.IsChildOf(transform)) continue;
+
+            // If collider has a Rigidbody, also ignore if it's exactly me
+            if (col.attachedRigidbody && col.attachedRigidbody.transform.IsChildOf(transform)) continue;
+
+            // This one would block standing up
+            return false;
+        }
+        return true;
+    }
+
+    private void StartSlide()
+    {
+        if (isSliding) return;
+        isSliding = true;
+
+        // Kamera hafif tilt
+        if (cameraController && cameraTiltOnSlide != 0f)
+            cameraController.SetRollTarget(cameraTiltOnSlide * 0.8f); // hafif
+    }
+
+    private void StopSlide()
+    {
+        if (!isSliding) return;
+        isSliding = false;
+
+        // Wallrun aktif değilse roll sıfırla
+        if (!isWallRunning && cameraController)
+            cameraController.SetRollTarget(0f);
+    }
+
+    // Eğime göre yerçekiminin yüzeye paralel bileşenini uygula + düz zeminde sürtünme
+    private void UpdateSlide(Vector3 wishDir, float wishMag, float dt)
+    {
+        // Sürtünme (yönün tersine sabit bir azalma)
+        if (planarVel.sqrMagnitude > 0.0001f && slideFriction > 0f)
+        {
+            float drop = slideFriction * dt;
+            float spd = planarVel.magnitude;
+            spd = Mathf.Max(0f, spd - drop);
+            planarVel = (planarVel / Mathf.Max(0.0001f, planarVel.magnitude)) * spd;
+        }
+
+        // Eğim ivmesi: yerçekiminin yüzeye paralel bileşeni
+        // gravity negatif; Up*gravity dünya uzayında “aşağı” vektörü veriyor.
+        Vector3 gVec = Up * gravity; // örn (0, -22, 0)
+        Vector3 along = Vector3.ProjectOnPlane(gVec, groundNormal);
+        planarVel += along * dt; // eğimde hızlanma
+
+        // Hafif yön verme (airControl benzeri ama sınırlı)
+        if (wishMag > 0f && planarVel.sqrMagnitude > 0.0001f)
+        {
+            float t = 1f - Mathf.Exp(-slideTurnRate * dt);
+            Vector3 newDir = Vector3.Slerp(planarVel.normalized, wishDir, t).normalized;
+            float spd = planarVel.magnitude;
+            planarVel = newDir * spd; // büyüklüğü koru
+        }
+
+        // Düşey hız: yerdeysek zemine hafif yapışık tutalım
+        if (verticalVel < 0f) verticalVel = -2f;
     }
 
     private bool TryConsumeJumpImmediate(bool groundedNow)
@@ -405,12 +516,18 @@ public class PlayerController : MonoBehaviour
 
     private bool IsGrounded()
     {
-        if (cc.isGrounded) return true;
+        groundNormal = Vector3.up; // varsayılan
+
+        if (cc.isGrounded) { groundNormal = Vector3.up; return true; }
 
         Vector3 origin = groundProbe.position + Up * 0.05f;
         if (Physics.SphereCast(origin, probeRadius, Vector3.down, out RaycastHit hit, probeRay, groundMask, QueryTriggerInteraction.Ignore))
         {
-            if (Vector3.Angle(hit.normal, Up) <= cc.slopeLimit + 0.5f) return true;
+            if (Vector3.Angle(hit.normal, Up) <= cc.slopeLimit + 0.5f)
+            {
+                groundNormal = hit.normal.normalized;
+                return true;
+            }
         }
         if (Physics.CheckSphere(groundProbe.position, probeRadius * 0.9f, groundMask, QueryTriggerInteraction.Ignore))
             return true;
